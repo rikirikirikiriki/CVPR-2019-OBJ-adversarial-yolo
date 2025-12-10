@@ -30,6 +30,10 @@ class BaseConfig(object):
         self.batch_size = 2
 
         self.loss_target = lambda obj, cls: obj * cls
+        # 对 anchor-based YOLOv3/YOLOv5 等默认存在 objectness 分支；
+        # 若换成完全无 objectness 的 anchor-free 检测头（仅输出类别得分），
+        # 请在子类中将 use_objectness 设为 False，以便损失直接使用类别概率。
+        self.use_objectness = True
 
 
 class Experiment1(BaseConfig):
@@ -145,7 +149,10 @@ class MyVisDroneConfig(BaseConfig):
 
         self.batch_size = 2
 
-        self.loss_target = lambda obj, cls: obj
+        # YOLO11 VisDrone 训练使用的是 anchor-free 头部，输出仅包含类别概率；
+        # 因此关闭 objectness，并将损失目标改为类别分数。
+        self.loss_target = lambda obj, cls: cls
+        self.use_objectness = False
 
         #子类新增的属性
         self.num_classes = 10                               # VisDrone数据集类别数（10类，与VisDrone官方一致）

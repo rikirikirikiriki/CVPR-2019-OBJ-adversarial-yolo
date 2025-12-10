@@ -43,9 +43,13 @@ class PatchTrainer(object):
         self.darknet_model = YOLO(self.model_path)  # 通过 YOLO 类替代 Darknet(cfg+weights) 的旧加载方式
         # ultralytics.YOLO 不是 nn.Module；实际的可训练网络位于 .model，下行确保网络驻留在 GPU 并冻结参数避免不必要的显存开销。
         # 为了让梯度能回传到补丁（而不是模型参数），保持模型在 train() 状态但仍冻结权重，避免推理路径里的 no_grad 包裹导致梯度中断。
-        self.darknet_model.model.to(self.device).train().requires_grad_(False)
+        #self.darknet_model.model.to(self.device).train().requires_grad_(False)
+        # 这里使用 eval() 而非 predict/train：eval() 不会包裹 no_grad，梯度仍可回传到补丁；同时避免 train() 分支走到仅限有标签训练
+        # 的路径（可能返回未激活的 logits 或额外损失值），从而避免 det_loss 变成负数、补丁停留在灰块。
+        self.darknet_model.model.to(self.device).eval().requires_grad_(False)
         self.scaler = GradScaler(enabled=torch.cuda.is_available())
         self.target_cls = getattr(self.config, 'target_cls', 0)
+        self.use_objectness = getattr(self.config, 'use_objectness', True)
         raw_imgsz = getattr(self.darknet_model.model, 'args', None)
         if isinstance(raw_imgsz, dict):
             imgsz = raw_imgsz.get('imgsz', 640)
@@ -193,6 +197,32 @@ class PatchTrainer(object):
                         del adv_batch_t, output, p_img_batch
                         torch.cuda.empty_cache()
                         continue
+
+                    def _combine_scores(obj_scores, cls_scores):
+                        """Anchor-free 头部可能没有 objectness，本函数根据配置选择打分来源。"""
+                        if not self.use_objectness:
+                            # 只用类别概率；若模型未返回 probs，退回到 conf 或全 1。
+                            base = cls_scores
+                            if base is None:
+                                if obj_scores is not None:
+                                    base = obj_scores.unsqueeze(-1) if obj_scores.ndim == 1 else obj_scores
+                                else:
+                                    base = torch.ones(1, 1, device=self.device)
+                            return base if base.ndim == 1 else base.max(dim=-1).values
+
+                        obj = obj_scores
+                        if obj is None:
+                            if cls_scores is not None:
+                                obj = torch.ones_like(cls_scores[..., 0])
+                            else:
+                                obj = torch.ones(1, device=self.device)
+
+                        cls = cls_scores
+                        if cls is None:
+                            cls = torch.ones_like(obj).unsqueeze(-1)
+
+                        combined = self.config.loss_target(obj.unsqueeze(-1) if obj.ndim == 1 else obj, cls)
+                        return combined if combined.ndim == 1 else combined.max(dim=-1).values
                         #     #max_prob = self.prob_extractor(output)
 
                         # results = None
@@ -223,26 +253,29 @@ class PatchTrainer(object):
 
                     if results is not None:
                         boxes = results[0].boxes
-                        obj_scores = boxes.conf.to(p_img_batch.device)
+                        #obj_scores = boxes.conf.to(p_img_batch.device)
+                        obj_scores = boxes.conf.to(p_img_batch.device) if boxes.conf is not None else None
                         probs = getattr(results[0], 'probs', None)
+                        cls_scores = probs.data.to(p_img_batch.device) if probs is not None else None
+                        max_prob = _combine_scores(obj_scores, cls_scores)
 
-                        if probs is not None:
-                            cls_scores = probs.data.to(p_img_batch.device)
-                            combined_scores = self.config.loss_target(obj_scores.unsqueeze(-1), cls_scores)
-                            max_prob = combined_scores.max(dim=1).values
-                        else:
-                            # yolo11 输出格式变：此处手动取 conf/cls 构造对抗损失
-                            max_cls_score = torch.ones_like(obj_scores)
-                            combined_scores = self.config.loss_target(obj_scores, max_cls_score)
-                            max_prob = combined_scores
+                       
                     else:
-                        # 当 YOLOv11 前向仅返回原始预测张量（而非 Results 对象）时，直接从输出张量中取 obj 与 cls 打分，避免旧版 prob_extractor 依赖。
+                        # 当 YOLOv11 前向仅返回原始预测张量（而非 Results 对象）时，根据 use_objectness 决定如何取 logits。
+
                         raw_preds = output[0] if isinstance(output, (list, tuple)) else output
                         if isinstance(raw_preds, torch.Tensor):
-                            obj_scores = raw_preds[..., 4]
-                            cls_scores = raw_preds[..., 5:] if raw_preds.shape[-1] > 5 else torch.ones_like(obj_scores).unsqueeze(-1)
-                            combined_scores = self.config.loss_target(obj_scores.unsqueeze(-1), cls_scores)
-                            max_prob = combined_scores.max(dim=-1).values
+                            # obj_scores = raw_preds[..., 4]
+                            # cls_scores = raw_preds[..., 5:] if raw_preds.shape[-1] > 5 else torch.ones_like(obj_scores).unsqueeze(-1)
+                            num_channels = raw_preds.shape[-1]
+                            cls_start = 5 if (self.use_objectness and num_channels > 5) else 4
+                            obj_logits = raw_preds[..., 4] if (self.use_objectness and num_channels > 4) else None
+                            cls_slice = raw_preds[..., cls_start:] if num_channels > cls_start else None
+
+                            obj_scores = torch.sigmoid(obj_logits) if obj_logits is not None else None
+                            cls_scores = torch.sigmoid(cls_slice) if cls_slice is not None else None
+                            max_prob = _combine_scores(obj_scores, cls_scores)
+                            
                         else:
                             raise RuntimeError(f"Unsupported YOLO output type: {type(raw_preds)}")
 
