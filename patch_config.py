@@ -17,6 +17,10 @@ class BaseConfig(object):
         self.printfile = "non_printability/30values.txt"
         self.patch_size = 300
 
+        # Maximum number of labels per image to pad/truncate to during batching.
+        # Set high enough (e.g., 200 for dense UAV imagery) to avoid losing objects.
+        self.max_lab = 200
+
         self.start_learning_rate = 0.03
 
         self.patch_name = 'base'

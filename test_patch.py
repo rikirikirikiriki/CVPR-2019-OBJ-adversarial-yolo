@@ -32,7 +32,8 @@ if __name__ == '__main__':
     patch_transformer = PatchTransformer().cuda()
 
     batch_size = 1
-    max_lab = 14
+    # Match the training cap so dense scenes (up to 200 objects) do not get truncated.
+    max_lab = 200
     img_size = darknet_model.height
 
     patch_size = 300

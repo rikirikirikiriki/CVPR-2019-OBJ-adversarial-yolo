@@ -420,6 +420,11 @@ class InriaDataset(Dataset):
         pad_size = self.max_n_labels - lab.shape[0]
         if(pad_size>0):
             padded_lab = F.pad(lab, (0, 0, 0, pad_size), value=1)
+        elif pad_size < 0:
+            # Limit the number of labels per image to max_n_labels to keep batch tensors aligned.
+            # Without this, DataLoader will raise a stacking error when some images contain
+            # many more objects than the configured cap (set via patch_config.max_lab).
+            padded_lab = lab[:self.max_n_labels]
         else:
             padded_lab = lab
         return padded_lab

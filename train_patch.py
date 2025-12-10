@@ -52,7 +52,8 @@ class PatchTrainer(object):
         img_size = self.darknet_model.height
         batch_size = self.config.batch_size
         n_epochs = 10000
-        max_lab = 14
+        # Allow datasets with many objects; configurable via patch_config.BaseConfig.max_lab.
+        max_lab = self.config.max_lab
 
         time_str = time.strftime("%Y%m%d-%H%M%S")
 
